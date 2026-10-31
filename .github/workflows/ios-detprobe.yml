@@ -1,0 +1,140 @@
+# Determinism check for the AtomUniverse sim core on iOS (arm64, IL2CPP) from an archived Unity iOS export
+# built with the DetProbe runner: builds it with xcodebuild (no signing), checks that the clang command lines
+# of the sim core carry -ffp-contract=off, counts FMA instructions in the sim-core object files and, for
+# simulator exports, runs the app in the iOS Simulator and reads the ATOMUNIVERSE_DETPROBE line.
+# This repo is public: no game code, no secrets, no credentials. Logs and the artifact only hold counts,
+# the probe line and compiler command lines, never C++, disassembly or the full xcodebuild log.
+name: ios-detprobe
+run-name: ios-detprobe ${{ inputs.label }} (${{ inputs.sdk }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      export_url:
+        description: Direct https link to the archive of the Unity iOS Xcode export with the DetProbe runner (.tar.zst, .zip, .tar.gz, .tar.xz)
+        type: string
+        required: true
+      export_sha256:
+        description: SHA-256 of that archive (optional, recommended)
+        type: string
+        required: false
+        default: ''
+      sdk:
+        description: SDK the export was made for (Unity PlayerSettings.iOS.sdkVersion)
+        type: choice
+        options:
+          - simulator
+          - device
+        default: simulator
+      label:
+        description: Name of this measurement, used for the artifact detprobe-<label>
+        type: string
+        required: true
+        default: detprobe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-detprobe-${{ inputs.label }}
+  cancel-in-progress: false
+
+env:
+  XCODE_APP: /Applications/Xcode_26.3.app
+
+jobs:
+  detprobe:
+    name: DetProbe ${{ inputs.label }} (${{ inputs.sdk }})
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check inputs
+        env:
+          LABEL: ${{ inputs.label }}
+          SDK: ${{ inputs.sdk }}
+        run: |
+          # The export link must not show up in this public log. It is read from the event file, not
+          # from env (the log prints a step's env before a mask exists), and masked for all later steps.
+          EXPORT_URL=$(jq -r '.inputs.export_url // ""' "$GITHUB_EVENT_PATH")
+          if [ -n "$EXPORT_URL" ]; then echo "::add-mask::$EXPORT_URL"; fi
+          [ -n "$EXPORT_URL" ] || { echo "::error::export_url is required"; exit 1; }
+          printf '%s' "$LABEL" | grep -Eq '^[A-Za-z0-9._-]{1,40}$' || { echo "::error::label may only use A-Z a-z 0-9 . _ -"; exit 1; }
+          case $SDK in simulator | device) ;; *) echo "::error::sdk must be simulator or device"; exit 1 ;; esac
+
+      - name: Check out scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          sw_vers
+
+      - name: Fetch Unity export
+        id: export
+        env:
+          EXPORT_URL: ${{ inputs.export_url }}
+          EXPORT_SHA256: ${{ inputs.export_sha256 }}
+        run: scripts/fetch-export.sh --url "$EXPORT_URL" --sha256 "$EXPORT_SHA256" --dest "$RUNNER_TEMP/export"
+
+      - name: Build and check the sim core (clang lines, FMA)
+        id: build
+        env:
+          KIND: ${{ steps.export.outputs.kind }}
+          PROJECT: ${{ steps.export.outputs.path }}
+          EXPORT_DIR: ${{ steps.export.outputs.export_dir }}
+          SDK: ${{ inputs.sdk }}
+        run: |
+          scripts/detprobe-xcodebuild.sh "$KIND" "$PROJECT" --export-dir "$EXPORT_DIR" --sdk "$SDK" \
+            --out "$RUNNER_TEMP/detprobe"
+
+      - name: Run DetProbe in the iOS Simulator
+        id: simulator
+        if: inputs.sdk == 'simulator'
+        env:
+          APP_PATH: ${{ steps.build.outputs.app_path }}
+        run: scripts/detprobe-simulator.sh --app "$APP_PATH" --out "$RUNNER_TEMP/detprobe" --timeout 300
+
+      - name: Summary
+        if: always()
+        env:
+          LABEL: ${{ inputs.label }}
+          SDK: ${{ inputs.sdk }}
+          EXPORT_SHA256: ${{ steps.export.outputs.export_sha256 }}
+          EXPORT_BYTES: ${{ steps.export.outputs.export_bytes }}
+        run: |
+          ev="$RUNNER_TEMP/detprobe/evidence.txt"
+          v() { sed -n "s/^$1=//p" "$ev" 2>/dev/null | tail -n 1; }
+          {
+            echo "### DetProbe $LABEL ($SDK)"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Export archive | ${EXPORT_BYTES:-?} bytes, SHA-256 \`${EXPORT_SHA256:-?}\` |"
+            echo "| Probe line | \`$(v PROBE_LINE)\` |"
+            echo "| Probe match / checksum / trigger | $(v PROBE_MATCH) / \`$(v PROBE_CHECKSUM)\` / $(v PROBE_TRIGGER) |"
+            echo "| Simulator | $(v SIM_DEVICE) $(v SIM_RUNTIME) |"
+            echo "| Sim-core clang lines with -ffp-contract=off | $(v SIM_CORE_CLANG_WITH_FLAG) of $(v SIM_CORE_CLANG_LINES) (from $(v SIM_CORE_CLANG_SOURCE), last -ffp-contract: $(v SIM_CORE_LAST_FP_CONTRACT), opt $(v SIM_CORE_OPT)) |"
+            echo "| Sim-core sources | $(v SIM_CORE_SOURCES) |"
+            echo "| FMA in sim-core objects | $(v SIM_CORE_FMA) in $(v SIM_CORE_OBJECTS) objects ($(v SIM_CORE_INSTRUCTIONS) instructions) |"
+            echo "| FMA in all IL2CPP objects | $(v ALL_IL2CPP_FMA) in $(v ALL_IL2CPP_OBJECTS) objects ($(v ALL_IL2CPP_OBJECT_KINDS)) |"
+            echo "| FMA in sim functions of $(v LINKED_BINARY) | $(v LINKED_SIM_FMA) in $(v LINKED_SIM_FUNCTIONS) functions |"
+            echo "| Control a*b+c: FMA default / -ffp-contract=off | $(v CONTROL_FMA_DEFAULT) / $(v CONTROL_FMA_OFF) (clang default -ffp-contract=$(v CLANG_DEFAULT_FP_CONTRACT)) |"
+            echo "| Toolchain | $(v XCODE_VERSION), $(v CLANG_VERSION) |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: detprobe-${{ inputs.label }}
+          path: |
+            ${{ runner.temp }}/detprobe/evidence.txt
+            ${{ runner.temp }}/detprobe/sim-core-clang-lines.txt
+            ${{ runner.temp }}/detprobe/sim-core-objects.txt
+            ${{ runner.temp }}/detprobe/probe.txt
+            ${{ runner.temp }}/detprobe/simulator-console.log
+          retention-days: 14
+          if-no-files-found: warn
