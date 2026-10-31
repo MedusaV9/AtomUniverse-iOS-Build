@@ -1,0 +1,5 @@
+pipeline-test/*.xcodeproj/
+build/
+DerivedData/
+*.ipa
+*.xcarchive/

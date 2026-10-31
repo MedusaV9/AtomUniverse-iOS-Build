@@ -1,0 +1,145 @@
+# Builds an unsigned AtomUniverse .ipa from an archived Unity iOS Xcode export.
+# Without export_url it builds the tiny XcodeGen app in pipeline-test/ to prove the pipeline.
+# This repo is public: no game code, no secrets, no credentials. Documentation: README.md.
+name: ios-ipa
+
+on:
+  workflow_dispatch:
+    inputs:
+      export_url:
+        description: Direct https link to the archive of the Unity iOS Xcode export (.tar.zst, .zip, .tar.gz, .tar.xz). Empty = pipeline test with the mini app.
+        type: string
+        required: false
+        default: ''
+      export_sha256:
+        description: SHA-256 of that archive (optional, recommended)
+        type: string
+        required: false
+        default: ''
+      version:
+        description: Version in the file name, e.g. 0.2.0
+        type: string
+        required: true
+        default: 0.0.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa
+  cancel-in-progress: false
+
+env:
+  XCODE_APP: /Applications/Xcode_26.3.app
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+  IPA_PREFIX: AtomUniverse
+
+jobs:
+  ipa:
+    name: Unsigned .ipa
+    runs-on: macos-26
+    timeout-minutes: ${{ inputs.export_url == '' && 20 || 90 }}
+    steps:
+      - name: Check out scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check inputs
+        id: inputs
+        env:
+          EXPORT_URL: ${{ inputs.export_url }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          printf '%s' "$VERSION" | grep -Eq '^[A-Za-z0-9._-]{1,40}$' || { echo "::error::version may only use A-Z a-z 0-9 . _ -"; exit 1; }
+          if [ -z "$EXPORT_URL" ]; then
+            echo "mode=pipeline-test" >>"$GITHUB_OUTPUT"
+            echo "version=$VERSION-pipelinetest" >>"$GITHUB_OUTPUT"
+          else
+            echo "mode=unity-export" >>"$GITHUB_OUTPUT"
+            echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          sw_vers
+
+      - name: Generate pipeline-test project (XcodeGen)
+        id: pipeline
+        if: steps.inputs.outputs.mode == 'pipeline-test'
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate --spec pipeline-test/project.yml
+          {
+            echo "kind=--project"
+            echo "path=pipeline-test/AtomUniversePipelineTest.xcodeproj"
+            echo "scheme=AtomUniversePipelineTest"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Fetch Unity export
+        id: export
+        if: steps.inputs.outputs.mode == 'unity-export'
+        env:
+          EXPORT_URL: ${{ inputs.export_url }}
+          EXPORT_SHA256: ${{ inputs.export_sha256 }}
+        run: scripts/fetch-export.sh --url "$EXPORT_URL" --sha256 "$EXPORT_SHA256" --dest "$RUNNER_TEMP/export"
+
+      - name: Archive and package
+        id: build
+        env:
+          KIND: ${{ steps.pipeline.outputs.kind || steps.export.outputs.kind }}
+          PROJECT: ${{ steps.pipeline.outputs.path || steps.export.outputs.path }}
+          SCHEME: ${{ steps.pipeline.outputs.scheme || 'Unity-iPhone' }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          scripts/build-unsigned-ipa.sh "$KIND" "$PROJECT" --scheme "$SCHEME" \
+            --name "$IPA_PREFIX" --version "$VERSION" --out "$RUNNER_TEMP/ipa"
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.build.outputs.ipa_path }}
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload xcodebuild log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodebuild-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/ipa/xcodebuild-archive.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: success()
+        env:
+          MODE: ${{ steps.inputs.outputs.mode }}
+          IPA_NAME: ${{ steps.build.outputs.ipa_name }}
+          IPA_BYTES: ${{ steps.build.outputs.ipa_bytes }}
+          IPA_SHA256: ${{ steps.build.outputs.ipa_sha256 }}
+          APP_NAME: ${{ steps.build.outputs.app_name }}
+          ARCHIVE_SECONDS: ${{ steps.build.outputs.archive_seconds }}
+          EXPORT_SHA256: ${{ steps.export.outputs.export_sha256 }}
+        run: |
+          {
+            echo "### Unsigned .ipa"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Mode | $MODE |"
+            echo "| Artifact | \`$IPA_NAME\` |"
+            echo "| App | \`$APP_NAME\` |"
+            echo "| Size | $IPA_BYTES bytes |"
+            echo "| SHA-256 | \`$IPA_SHA256\` |"
+            echo "| xcodebuild archive | ${ARCHIVE_SECONDS}s |"
+            if [ -n "$EXPORT_SHA256" ]; then echo "| Export archive SHA-256 | \`$EXPORT_SHA256\` |"; fi
+            echo "| Xcode | $(xcodebuild -version | head -n 1) |"
+          } >>"$GITHUB_STEP_SUMMARY"
