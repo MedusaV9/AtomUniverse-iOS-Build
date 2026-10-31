@@ -21,6 +21,11 @@ on:
         type: string
         required: true
         default: 0.0.0
+      release_tag:
+        description: Tag of an existing draft release in this repo to attach the .ipa to (optional)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -40,19 +45,23 @@ jobs:
     name: Unsigned .ipa
     runs-on: macos-26
     timeout-minutes: ${{ inputs.export_url == '' && 20 || 90 }}
+    outputs:
+      ipa_name: ${{ steps.build.outputs.ipa_name }}
     steps:
-      - name: Check out scripts
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
       - name: Check inputs
         id: inputs
         env:
-          EXPORT_URL: ${{ inputs.export_url }}
           VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          # The export link must not show up in this public log. It is read from the event file, not
+          # from env (the log prints a step's env before a mask exists), and masked for all later steps.
+          EXPORT_URL=$(jq -r '.inputs.export_url // ""' "$GITHUB_EVENT_PATH")
+          if [ -n "$EXPORT_URL" ]; then echo "::add-mask::$EXPORT_URL"; fi
           printf '%s' "$VERSION" | grep -Eq '^[A-Za-z0-9._-]{1,40}$' || { echo "::error::version may only use A-Z a-z 0-9 . _ -"; exit 1; }
+          if [ -n "$RELEASE_TAG" ]; then
+            printf '%s' "$RELEASE_TAG" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || { echo "::error::release_tag may only use A-Z a-z 0-9 . _ / -"; exit 1; }
+          fi
           if [ -z "$EXPORT_URL" ]; then
             echo "mode=pipeline-test" >>"$GITHUB_OUTPUT"
             echo "version=$VERSION-pipelinetest" >>"$GITHUB_OUTPUT"
@@ -60,6 +69,11 @@ jobs:
             echo "mode=unity-export" >>"$GITHUB_OUTPUT"
             echo "version=$VERSION" >>"$GITHUB_OUTPUT"
           fi
+
+      - name: Check out scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Select Xcode
         run: |
@@ -128,6 +142,7 @@ jobs:
           APP_NAME: ${{ steps.build.outputs.app_name }}
           ARCHIVE_SECONDS: ${{ steps.build.outputs.archive_seconds }}
           EXPORT_SHA256: ${{ steps.export.outputs.export_sha256 }}
+          EXPORT_BYTES: ${{ steps.export.outputs.export_bytes }}
         run: |
           {
             echo "### Unsigned .ipa"
@@ -140,6 +155,39 @@ jobs:
             echo "| Size | $IPA_BYTES bytes |"
             echo "| SHA-256 | \`$IPA_SHA256\` |"
             echo "| xcodebuild archive | ${ARCHIVE_SECONDS}s |"
-            if [ -n "$EXPORT_SHA256" ]; then echo "| Export archive SHA-256 | \`$EXPORT_SHA256\` |"; fi
+            if [ -n "$EXPORT_SHA256" ]; then
+              echo "| Export archive | $EXPORT_BYTES bytes, SHA-256 \`$EXPORT_SHA256\` |"
+              # IL2CPP prints its clang command lines into the xcodebuild log (--print-command-line).
+              echo "| Log lines with -ffp-contract=off | $(grep -c -e '-ffp-contract=off' "$RUNNER_TEMP/ipa/xcodebuild-archive.log" || true) |"
+            fi
             echo "| Xcode | $(xcodebuild -version | head -n 1) |"
           } >>"$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Attach to draft release
+    needs: ipa
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Write access only here, not in the job that runs the export's build scripts.
+    permissions:
+      contents: write
+    steps:
+      - name: Download .ipa
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.ipa.outputs.ipa_name }}
+          path: ipa
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          IPA_NAME: ${{ needs.ipa.outputs.ipa_name }}
+        run: |
+          draft=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft) \
+            || { echo "::error::no release with tag $TAG in $GITHUB_REPOSITORY"; exit 1; }
+          [ "$draft" = true ] || { echo "::error::release $TAG is published, only draft releases are changed"; exit 1; }
+          gh release upload "$TAG" "ipa/$IPA_NAME" -R "$GITHUB_REPOSITORY" --clobber
+          echo "Attached $IPA_NAME to draft release $TAG"
+          echo "Attached \`$IPA_NAME\` to draft release \`$TAG\`." >>"$GITHUB_STEP_SUMMARY"
