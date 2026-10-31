@@ -119,6 +119,7 @@ jobs:
             echo "| Sim-core clang lines with -ffp-contract=off | $(v SIM_CORE_CLANG_WITH_FLAG) of $(v SIM_CORE_CLANG_LINES) (from $(v SIM_CORE_CLANG_SOURCE), last -ffp-contract: $(v SIM_CORE_LAST_FP_CONTRACT), opt $(v SIM_CORE_OPT)) |"
             echo "| Sim-core sources | $(v SIM_CORE_SOURCES) |"
             echo "| FMA in sim-core objects | $(v SIM_CORE_FMA) in $(v SIM_CORE_OBJECTS) objects ($(v SIM_CORE_INSTRUCTIONS) instructions) |"
+            echo "| FMA hits in sim-core objects (distinct source lines, data-in-code entries) | $(v SIM_CORE_FMA_HITS) ($(v SIM_CORE_FMA_SOURCE_LINES), $(v SIM_CORE_DATA_IN_CODE)) |"
             echo "| FMA in all IL2CPP objects | $(v ALL_IL2CPP_FMA) in $(v ALL_IL2CPP_OBJECTS) objects ($(v ALL_IL2CPP_OBJECT_KINDS)) |"
             echo "| FMA in sim functions of $(v LINKED_BINARY) | $(v LINKED_SIM_FMA) in $(v LINKED_SIM_FUNCTIONS) functions |"
             echo "| Control a*b+c: FMA default / -ffp-contract=off | $(v CONTROL_FMA_DEFAULT) / $(v CONTROL_FMA_OFF) (clang default -ffp-contract=$(v CLANG_DEFAULT_FP_CONTRACT)) |"
@@ -134,6 +135,7 @@ jobs:
             ${{ runner.temp }}/detprobe/evidence.txt
             ${{ runner.temp }}/detprobe/sim-core-clang-lines.txt
             ${{ runner.temp }}/detprobe/sim-core-objects.txt
+            ${{ runner.temp }}/detprobe/sim-core-fma.txt
             ${{ runner.temp }}/detprobe/probe.txt
             ${{ runner.temp }}/detprobe/simulator-console.log
           retention-days: 14

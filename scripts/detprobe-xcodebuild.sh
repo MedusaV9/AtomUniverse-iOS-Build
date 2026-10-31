@@ -10,6 +10,7 @@
 #   <out>/evidence.txt              KEY=VALUE lines (also appended in lower case to $GITHUB_OUTPUT)
 #   <out>/sim-core-clang-lines.txt  clang command lines that compile the sim core (AtomUniverse.Sim*.cpp/.c)
 #   <out>/sim-core-objects.txt      per sim-core object file: source, FMA count, instruction count
+#   <out>/sim-core-fma.txt          per FMA hit in a sim-core object: offset, operands, generated-source file:line
 # FMA = fmadd, fmsub, fnmadd, fnmsub, fmla, fmls (and their SVE/vector forms) in `objdump -d`.
 # Runs with the bash 3.2 that ships with macOS (the analysis itself is python3).
 set -euo pipefail
@@ -24,7 +25,7 @@ while [ $# -gt 0 ]; do
     --sdk) sdk=${2:?--sdk needs a value}; shift 2 ;;
     --out) out=${2:?--out needs a value}; shift 2 ;;
     --export-dir) export_dir=${2:?--export-dir needs a value}; shift 2 ;;
-    -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -194,6 +195,32 @@ def objdump_counts(path):
                 fma += 1
     return insns, fma
 
+LINE_INFO = re.compile(r'^; (\S+\.(?:cpp|c|h|hpp|inl)):(\d+)')
+LABEL = re.compile(r'^[0-9a-f]+ <(.+)>:$')
+
+def fma_details(path):
+    """Each FMA hit with its offset, operands and the generated-source line from DWARF (objdump -l).
+    Only file:line goes out, never code or symbol names; the C++ is looked up privately."""
+    hits, line, label_sim = [], '-', False
+    for l in run(['xcrun', 'objdump', '-d', '-l', '--no-show-raw-insn', path]).splitlines():
+        lm = LINE_INFO.match(l)
+        if lm:
+            line = '%s:%s' % (os.path.basename(lm.group(1)), lm.group(2))
+            continue
+        bm = LABEL.match(l)
+        if bm:
+            label_sim = SIM_SYM.search(bm.group(1)) is not None
+            continue
+        m = INSN.match(l)
+        if m and FMA.match(m.group(1)):
+            operands = l[m.end():].split('//')[0].split(';')[0].strip()
+            hits.append('object=%s offset=0x%s insn=%s %s line=%s in_sim_symbol=%s' % (
+                os.path.basename(path), l.split(':', 1)[0].strip(), m.group(1), operands, line,
+                'yes' if label_sim else 'no'))
+    dic = run(['xcrun', 'objdump', '--macho', '--data-in-code', path])
+    dic_entries = sum(1 for l in dic.splitlines() if re.match(r'^0x[0-9a-f]+\s', l.strip()))
+    return hits, dic_entries
+
 def kind_of(path):
     with open(path, 'rb') as f:
         head = f.read(4)
@@ -244,6 +271,19 @@ with open(os.path.join(out, 'sim-core-objects.txt'), 'w') as f:
     for r in sorted(sim_rows):
         f.write('source=%s object=%s kind=%s instructions=%d fma=%d sim_symbols=%s\n' % (
             r[0], r[1], r[2], r[3], r[4], 'yes' if r[5] else 'no'))
+fma_hits, dic_total = [], 0
+for r in sim_rows:
+    if r[2] == 'macho':
+        hits, dic = fma_details(by_name[r[1]])
+        fma_hits += hits
+        dic_total += dic
+with open(os.path.join(out, 'sim-core-fma.txt'), 'w') as f:
+    f.write('# FMA instructions in sim-core objects: offset, operands, generated-source line (DWARF), in a sim symbol\n')
+    for h in fma_hits[:500]:
+        f.write(h + '\n')
+ev['SIM_CORE_FMA_HITS'] = len(fma_hits)
+ev['SIM_CORE_FMA_SOURCE_LINES'] = len(set(h.split(' line=')[1].split(' ')[0] for h in fma_hits))
+ev['SIM_CORE_DATA_IN_CODE'] = dic_total
 
 # (c) Linked binary: FMA inside functions whose symbol names come from the sim core.
 binary = ''
