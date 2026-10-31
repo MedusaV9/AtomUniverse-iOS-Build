@@ -123,8 +123,10 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      # Only for the pipeline test: with a Unity export the full log quotes IL2CPP's C++ (generated
+      # from game code), and artifacts of this repo are public. The job log keeps the error lines.
       - name: Upload xcodebuild log
-        if: failure()
+        if: failure() && steps.inputs.outputs.mode == 'pipeline-test'
         uses: actions/upload-artifact@v7
         with:
           name: xcodebuild-log-${{ github.run_id }}
@@ -143,6 +145,7 @@ jobs:
           ARCHIVE_SECONDS: ${{ steps.build.outputs.archive_seconds }}
           EXPORT_SHA256: ${{ steps.export.outputs.export_sha256 }}
           EXPORT_BYTES: ${{ steps.export.outputs.export_bytes }}
+          FP_CONTRACT_LINES: ${{ steps.build.outputs.fp_contract_lines }}
         run: |
           {
             echo "### Unsigned .ipa"
@@ -157,8 +160,7 @@ jobs:
             echo "| xcodebuild archive | ${ARCHIVE_SECONDS}s |"
             if [ -n "$EXPORT_SHA256" ]; then
               echo "| Export archive | $EXPORT_BYTES bytes, SHA-256 \`$EXPORT_SHA256\` |"
-              # IL2CPP prints its clang command lines into the xcodebuild log (--print-command-line).
-              echo "| Log lines with -ffp-contract=off | $(grep -c -e '-ffp-contract=off' "$RUNNER_TEMP/ipa/xcodebuild-archive.log" || true) |"
+              echo "| xcodebuild log lines with -ffp-contract=off | $FP_CONTRACT_LINES |"
             fi
             echo "| Xcode | $(xcodebuild -version | head -n 1) |"
           } >>"$GITHUB_STEP_SUMMARY"

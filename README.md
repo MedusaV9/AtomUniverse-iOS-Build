@@ -28,7 +28,8 @@ Der Link muss die Datei direkt liefern (`curl -L` lädt sie). Eine HTML-Seite, z
 - Artifact **`AtomUniverse-<version>-unsigned.ipa`** (beim Pipeline-Test `AtomUniverse-<version>-pipelinetest-unsigned.ipa`). Es ist eine einzelne Datei, kein ZIP drumherum, und bleibt 14 Tage liegen.
 - Größe, SHA-256 und Dauer stehen in der Zusammenfassung des Laufs.
 - Mit `release_tag` zusätzlich als Asset am Release-Entwurf. Entwürfe sieht nur, wer Schreibrechte am Repo hat.
-- Wenn der Build scheitert, liegt das vollständige xcodebuild-Log als Artifact `xcodebuild-log-<run-id>` bei (7 Tage). Achtung: Compiler-Fehler darin zeigen Zeilen aus dem von IL2CPP erzeugten C++.
+- Das Job-Log zeigt, wie oft `-ffp-contract=off` in den clang-Aufrufen von IL2CPP steht (`Log lines with -ffp-contract=off`).
+- Wenn der Build scheitert, zeigt das Job-Log nur die Fehlerzeilen und die Liste der fehlgeschlagenen Befehle. Das vollständige xcodebuild-Log gibt es als Artifact `xcodebuild-log-<run-id>` (7 Tage) nur beim Pipeline-Test, weil es bei einem Unity-Export Zeilen aus dem von IL2CPP erzeugten C++ zitiert und Artefakte hier öffentlich sind.
 
 ## Ablauf
 

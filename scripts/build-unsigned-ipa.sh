@@ -7,7 +7,8 @@
 # Runs `xcodebuild archive` for generic iOS devices with CODE_SIGNING_ALLOWED=NO, CODE_SIGNING_REQUIRED=NO
 # and an empty CODE_SIGN_IDENTITY, then zips Payload/<App>.app into <out>/<prefix>-<version>-unsigned.ipa.
 # The full xcodebuild log is <out>/xcodebuild-archive.log. Prints KEY=VALUE lines (IPA_PATH, IPA_NAME,
-# IPA_BYTES, IPA_SHA256, APP_NAME, ARCHIVE_SECONDS) and appends them in lower case to $GITHUB_OUTPUT if set.
+# IPA_BYTES, IPA_SHA256, APP_NAME, ARCHIVE_SECONDS, FP_CONTRACT_LINES) and appends them in lower case
+# to $GITHUB_OUTPUT if set.
 # Runs with the bash 3.2 that ships with macOS.
 set -euo pipefail
 
@@ -62,12 +63,19 @@ if ! xcodebuild archive \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY= \
   >"$log" 2>&1; then
-  tail -n 80 "$log" >&2
+  # Only diagnostic lines and the list of failed commands: clang's source excerpts would show
+  # IL2CPP's C++ generated from game code in this public log.
+  grep -E 'error:|\*\* ARCHIVE FAILED' "$log" | tail -n 60 >&2 || true
+  sed -n '/The following build commands failed/,$p' "$log" | head -n 30 >&2 || true
   die "xcodebuild archive failed, full log: $log"
 fi
 seconds=$(($(date +%s) - start))
 grep -E 'warning:|error:|\*\* ARCHIVE' "$log" | tail -n 40 || true
 echo "Archive done in ${seconds}s"
+# IL2CPP prints its clang command lines into the log (--print-command-line), so this counts the
+# compiler calls that got the switch (PLAN v1.1 decision 8).
+fp_contract=$(grep -c -e '-ffp-contract=off' "$log" || true)
+echo "Log lines with -ffp-contract=off: $fp_contract"
 
 apps=$(find "$archive/Products/Applications" -maxdepth 1 -type d -name '*.app' 2>/dev/null || true)
 count=$(printf '%s' "$apps" | grep -c . || true)
@@ -96,6 +104,7 @@ echo "IPA_BYTES=$bytes"
 echo "IPA_SHA256=$sha"
 echo "APP_NAME=$app_name"
 echo "ARCHIVE_SECONDS=$seconds"
+echo "FP_CONTRACT_LINES=$fp_contract"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
     echo "ipa_path=$ipa"
@@ -104,5 +113,6 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "ipa_sha256=$sha"
     echo "app_name=$app_name"
     echo "archive_seconds=$seconds"
+    echo "fp_contract_lines=$fp_contract"
   } >>"$GITHUB_OUTPUT"
 fi
